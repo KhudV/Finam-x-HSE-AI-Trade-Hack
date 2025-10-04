@@ -15,3 +15,7 @@ python -m spacy download ru_core_news_sm
 python -m spacy download en_core_web_trf
 
 python -m spacy download ru_core_news_lg
+
+# Установка переменных окружения
+
+Установить API-ключ в переменную окружения OPENROUTER_API_KEY

@@ -3,9 +3,11 @@ from typing import List, Dict, Any, Optional, Tuple
 from urllib.parse import urlparse
 import heapq
 import re
-
+import json
+import argparse
 from news_parser import get_financial_news, DEFAULT_FINANCE_FEEDS
 from dedupe import dedupe_articles  # возвращает annotated_articles, clusters_meta
+from hotness_calc import calculate_hotness_for_cluster
 import os
 from draft_generator import generate_draft_for_event, make_client_from_env
 from openai import OpenAI
@@ -277,13 +279,29 @@ def extract_events_for_interval(start: str,
         # sources and timeline with detection of confirmations/updates
         sources, timeline = build_sources_and_timeline_for_cluster(cid, cluster_article_indices, annotated_articles, max_sources=5)
 
+        # compute hotness using hotness_calc.py if available
+        hot_res = {"hotness": 0.0, "components": {
+            "surprise": 0.0, "materiality": 0.0, "velocity": 0.0, "coverage": 0.0, "credibility": 0.0
+        }}
+
+        hot_res_raw = calculate_hotness_for_cluster(cluster_articles)
+        # hot_res_raw expected to contain keys 'hotness' and component values (per your hotness_calc.py)
+        if isinstance(hot_res_raw, dict) and 'hotness' in hot_res_raw:
+            hot_res = hot_res_raw
+        else:
+            # fallback if different shape
+            hot_res = {"hotness": float(hot_res_raw or 0.0), "components": {}}
+
         event = {
             "dedup_group": cid,
             "headline": headline,
             "entities": entities,
             "sources": sources,
-            "timeline": timeline
+            "timeline": timeline,
+            "hotness": hot_res.get("hotness", 0.0),
+            "components": hot_res.get("components", {})
         }
+
 
         # Generate draft: title separately, rest as text
         draft_obj = {"title": None, "text": None, "raw": None}
@@ -308,20 +326,40 @@ def extract_events_for_interval(start: str,
         events.append(event)
     return events
 
-# -------------------- demo / example usage --------------------
+
+def main_cli():
+    parser = argparse.ArgumentParser(description="Extract top-k events (clusters) by hotness for a given interval.")
+    parser.add_argument("start", help="Start time (ISO format, e.g. 2025-10-01T00:00:00)")
+    parser.add_argument("end", help="End time (ISO format)")
+    parser.add_argument("-k", type=int, default=10, help="Return top-k clusters by hotness")
+    parser.add_argument("--feeds", nargs="*", help="Optional list of RSS feed URLs (overrides defaults)")
+    parser.add_argument("--no-draft", action="store_true", help="Do not generate drafts")
+    args = parser.parse_args()
+
+    try:
+        start_dt = parse_iso_datetime(args.start)
+        end_dt = parse_iso_datetime(args.end)
+    except Exception as e:
+        logger.error("Date parsing error: %s", e)
+        raise SystemExit(2)
+
+    # Используем DEFAULT_FINANCE_FEEDS из news_parser.py по умолчанию,
+    # если --feeds не были переданы
+    from news_parser import DEFAULT_FINANCE_FEEDS
+    feed_urls = args.feeds if args.feeds else DEFAULT_FINANCE_FEEDS
+
+    events = extract_events_for_interval(start_dt.isoformat(), end_dt.isoformat(),
+                                         feed_urls=feed_urls,
+                                         max_workers=6,
+                                         fetch_text=True,
+                                         similarity_threshold=0.78,
+                                         model_name="all-MiniLM-L6-v2",
+                                         use_sentence_transformers=None,
+                                         generate_drafts=not args.no_draft,
+                                         top_k=args.k)
+
+    # Output JSON to stdout
+    print(json.dumps({"start": args.start, "end": args.end, "top_k": args.k, "events": events}, default=str, ensure_ascii=False, indent=2))
+
 if __name__ == "__main__":
-    from datetime import datetime, timedelta
-    end = datetime.utcnow()
-    start = end - timedelta(hours=24)
-    print("Running extractor for last 24 hours...")
-    evs = extract_events_for_interval(start.isoformat(), end.isoformat(), max_workers=6, fetch_text=True)
-    print(f"Found {len(evs)} events (clusters).")
-    for e in evs[:10]:
-        print("=== Cluster", e["dedup_group"], "===")
-        print("Headline:", e["headline"])
-        print("Entities:", e["entities"])
-        print("Sources:", e["sources"])
-        print("Timeline:")
-        for t in e["timeline"]:
-            print("  ", t["ts"], t["type"], t["source"], t["url"])
-        print()
+    main_cli()

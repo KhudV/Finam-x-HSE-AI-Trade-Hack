@@ -6,6 +6,18 @@ import re
 
 from news_parser import get_financial_news, DEFAULT_FINANCE_FEEDS
 from dedupe import dedupe_articles  # возвращает annotated_articles, clusters_meta
+import os
+from draft_generator import generate_draft_for_event, make_client_from_env
+from openai import OpenAI
+
+
+try:
+    _OPENAI_CLIENT = make_client_from_env(api_key_env="OPENROUTER_API_KEY", base_url="https://openrouter.ai/api/v1")
+except Exception as e:
+    _OPENAI_CLIENT = None
+    import logging
+    logging.getLogger(__name__).warning("OpenAI client not initialized: %s", e)
+
 
 # ---------- Настройки / словари ----------
 # Ключевые слова для детекции событий в тексте (англ + рус)
@@ -272,14 +284,28 @@ def extract_events_for_interval(start: str,
             "sources": sources,
             "timeline": timeline
         }
-        events.append(event)
 
-    # optionally sort events by latest timeline timestamp desc (i.e. hottest recent clusters first)
-    def latest_ts(ev):
-        if not ev["timeline"]:
-            return datetime.min
-        return max((t["ts"] or datetime.min) for t in ev["timeline"])
-    events = sorted(events, key=lambda e: latest_ts(e), reverse=True)
+        # Generate draft: title separately, rest as text
+        draft_obj = {"title": None, "text": None, "raw": None}
+        try:
+            if _OPENAI_CLIENT is not None:
+                dg = generate_draft_for_event(event, client=_OPENAI_CLIENT, model="openai/gpt-5", temperature=0.0)
+                # dg has keys: title, text, raw
+                draft_obj = dg
+            else:
+                # try to create client from env as fallback
+                try:
+                    client_tmp = make_client_from_env(api_key_env="OPENROUTER_API_KEY", base_url="https://openrouter.ai/api/v1")
+                    draft_obj = generate_draft_for_event(event, client=client_tmp, model="openai/gpt-5", temperature=0.0)
+                except Exception:
+                    draft_obj = {"title": None, "text": None, "raw": None}
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("Draft generation failed for cluster %s: %s", cid, e)
+            draft_obj = {"title": None, "text": None, "raw": None}
+
+        event["draft"] = draft_obj
+        events.append(event)
     return events
 
 # -------------------- demo / example usage --------------------

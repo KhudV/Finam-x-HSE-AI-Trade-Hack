@@ -1,0 +1,7 @@
+feedparser
+newspaper3k
+python-dateutil
+beautifulsoup4
+requests
+tqdm
+lxml[html_clean]

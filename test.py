@@ -40,4 +40,4 @@ annotated_articles, clusters_meta = dedupe_articles(articles,
                                                     use_sentence_transformers=True)
 print("Clusters meta:", clusters_meta)
 for a in annotated_articles:
-    print(a['dedup_group_id'], a['title'][:80], a['source'])
+    print(a['dedup_group_id'], a['title'][:80], a['source'], a['entities'])

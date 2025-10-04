@@ -8,3 +8,4 @@ lxml[html_clean]
 scikit-learn>=1.0
 sentence-transformers>=2.2.2
 numpy
+spacy>=3.0.0

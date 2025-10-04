@@ -225,11 +225,16 @@ def get_financial_news(start: Union[str, datetime],
 # ---------------- RSS list ----------------
 DEFAULT_FINANCE_FEEDS = [
     "http://feeds.reuters.com/reuters/businessNews",
-    "http://feeds.reuters.com/Reuters/domesticNews",
-    "https://www.ft.com/?format=rss",               # Financial Times (may be paywalled)
-    "https://www.bloomberg.com/feed/podcast/etf-report.xml",  # example (Bloomberg RSS usage varies)
+    "https://www.ft.com/?format=rss",               # Financial Times
+    "https://www.bloomberg.com/feed/podcast/etf-report.xml",
     "https://seekingalpha.com/feed.xml",            # Seeking Alpha
-    "https://www.investing.com/rss/news_25.rss",    # Investing.com (example)
-    "https://www.wsj.com/xml/rss/3_7031.xml",       # WSJ markets (may be paywalled)
-    "https://finance.yahoo.com/news/rssindex"       # Yahoo Finance (example)
+    "https://www.investing.com/rss/news_25.rss",    # Investing.com
+    "https://www.wsj.com/xml/rss/3_7031.xml",       # WSJ markets
+    "https://finance.yahoo.com/news/rssindex",       # Yahoo Finance
+    "https://rssexport.rbc.ru/rbcnews/economics/20/full.rss", # РБК
+    "https://www.forbes.ru/newrss.xml", # Forbes
+    "https://www.finam.ru/analysis/conews/rsspoint/", # Finam
+    "https://www.investfunds.ru/news/rss/", # Investfunds
+    "https://www.banki.ru/xml/news.rss" # Banki.ru
+
 ]

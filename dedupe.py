@@ -5,6 +5,302 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
 import math
 import numpy as np
+import html
+
+# ---------- Filtered NER: companies / tickers / countries / sectors only ----------
+
+
+# ticker and token regexes
+TICKER_REGEX = re.compile(r"\$([A-Za-z]{1,6}\b)")            # $AAPL
+UPPER_ALNUM_RE = re.compile(r"\b[A-Z0-9]{1,5}\b")
+
+# sector keywords (extendable)
+SECTOR_KEYWORDS_EN = [
+    "technology", "tech", "financial", "finance", "healthcare", "health care",
+    "energy", "utilities", "consumer", "industrials", "materials", "real estate",
+    "telecom", "communication", "semiconductor", "banking", "retail", "automotive"
+]
+SECTOR_KEYWORDS_RU = [
+    "технолог", "финанс", "энергетик", "банк", "рознич", "потребительск", "промышлен",
+    "недвижим", "полупровод", "телеком", "фармацевт", "нефтегаз", "сельскохозяйств"
+]
+
+def is_sector_phrase(text: str) -> bool:
+    t = (text or "").lower()
+    for kw in SECTOR_KEYWORDS_EN:
+        if kw in t:
+            return True
+    for kw in SECTOR_KEYWORDS_RU:
+        if kw in t:
+            return True
+    return False
+
+def map_spacy_label(label: str) -> str:
+    # spaCy labels: ORG, GPE, LOC, NORP, PERSON, DATE, MONEY, PERCENT, ...
+    if label in ("ORG",):
+        return "company"
+    if label in ("GPE", "LOC", "NORP"):
+        return "country"
+    return "other"
+
+def lookup_ticker_by_name(name: str, ticker_map: dict = None):
+    if not ticker_map:
+        return None
+    return ticker_map.get(name.strip().lower())
+
+# ----------------- spaCy multilingual loading -----------------
+SPACY_AVAILABLE = False
+try:
+    import spacy
+    SPACY_AVAILABLE = True
+except Exception:
+    spacy = None
+    SPACY_AVAILABLE = False
+
+# We'll attempt to load best available models per language.
+# Priority: trf -> small. If not installed, leave None for fallback.
+NER_MODELS = {"en": None, "ru": None}
+NER_BACKEND_NAME = {"en": None, "ru": None}
+
+if SPACY_AVAILABLE:
+    # English
+    try:
+        nlp_en = spacy.load("en_core_web_trf")
+        NER_MODELS["en"] = nlp_en
+        NER_BACKEND_NAME["en"] = "spacy:en_core_web_trf"
+    except Exception:
+        try:
+            nlp_en = spacy.load("en_core_news_sm")
+            NER_MODELS["en"] = nlp_en
+            NER_BACKEND_NAME["en"] = "spacy:en_core_news_sm"
+        except Exception:
+            NER_MODELS["en"] = None
+            NER_BACKEND_NAME["en"] = None
+
+    # Russian
+    try:
+        nlp_ru = spacy.load("ru_core_web_trf")
+        NER_MODELS["ru"] = nlp_ru
+        NER_BACKEND_NAME["ru"] = "spacy:ru_core_web_trf"
+    except Exception:
+        try:
+            nlp_ru = spacy.load("ru_core_news_sm")
+            NER_MODELS["ru"] = nlp_ru
+            NER_BACKEND_NAME["ru"] = "spacy:ru_core_news_sm"
+        except Exception:
+            NER_MODELS["ru"] = None
+            NER_BACKEND_NAME["ru"] = None
+
+# ----------------- language detection heuristic (fast) -----------------
+CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
+
+def guess_lang_by_text(text: str) -> str:
+    """Very fast heuristic: if text contains Cyrillic -> 'ru', else 'en'."""
+    if not text:
+        return "en"
+    if CYRILLIC_RE.search(text):
+        return "ru"
+    return "en"
+
+# -------------- cleaning helpers (simple) ----------------
+from bs4 import BeautifulSoup
+HTML_TAG_RE = re.compile(r"<[^>]+>")
+URL_RE = re.compile(r"https?://\S+|www\.\S+")
+
+def clean_text_for_ner(raw_text: str) -> str:
+    """Strip HTML, URLs and unescape entities."""
+    if not raw_text:
+        return ""
+    try:
+        soup = BeautifulSoup(raw_text, "lxml")
+        text = soup.get_text(separator=" ", strip=True)
+    except Exception:
+        text = HTML_TAG_RE.sub(" ", raw_text)
+    text = URL_RE.sub(" ", text)
+    text = html.unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+def normalize_entity_name(name: str) -> str:
+    if not name:
+        return ""
+    s = html.unescape(name).strip()
+    s = HTML_TAG_RE.sub("", s)
+    s = re.sub(r"^[\W_]+|[\W_]+$", "", s, flags=re.UNICODE)
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+def is_valid_entity_name(s: str) -> bool:
+    if not s:
+        return False
+    if len(s) < 2 or len(s) > 120:
+        return False
+    low = s.lower()
+    if "<" in s or ">" in s or "=" in s or "&" in s:
+        return False
+    if "http" in low or "www." in low:
+        return False
+    if not re.search(r"[A-Za-zА-Яа-яёЁ]", s):
+        return False
+    non_word_ratio = sum(1 for ch in s if not re.match(r"[\wа-яА-ЯёЁ]", ch)) / max(1, len(s))
+    if non_word_ratio > 0.4:
+        return False
+    if re.search(r"[;:,/\\]$", s):
+        return False
+    return True
+
+# ----------------- main multilingual extract_entities_batch -----------------
+def extract_entities_batch(texts: List[str], ticker_map: dict = None) -> List[List[Dict[str, Any]]]:
+    """
+    Multilingual batch NER:
+      - splits texts by guessed language (fast heuristic),
+      - uses best available spaCy model per language (trf preferred),
+      - if model missing for language -> fallback regex heuristics for that language.
+    Returns results in same order as input: list of lists of entities,
+    where each entity is {"name":..., "type": "company|ticker|country|sector", "ticker": optional}
+    """
+    n = len(texts)
+    results: List[Optional[List[Dict[str, Any]]]] = [None] * n
+
+    # prepare per-language buckets
+    buckets = {"en": [], "ru": []}            # list of (idx, cleaned_text)
+    for i, t in enumerate(texts):
+        # clean text to remove html shards (important before language guess)
+        cleaned = clean_text_for_ner(t or "")
+        lang = guess_lang_by_text(cleaned)
+        buckets[lang].append((i, cleaned))
+
+    # helper: process a bucket with spaCy model (or regex fallback)
+    def _process_bucket(lang: str, items: List[tuple]):
+        if not items:
+            return
+        model = NER_MODELS.get(lang)
+        if model is not None:
+            # run spaCy in batch
+            docs = model.pipe([txt for (_, txt) in items], batch_size=32)
+            for (idx, _), doc in zip(items, docs):
+                ents = []
+                seen = set()
+                text_full = doc.text or ""
+                # spaCy entities
+                for e in doc.ents:
+                    mapped = map_spacy_label(e.label_)
+                    name = normalize_entity_name(e.text)
+                    if not is_valid_entity_name(name):
+                        continue
+                    if mapped == "company":
+                        ticker = None
+                        if ticker_map:
+                            ticker = lookup_ticker_by_name(name, ticker_map) or lookup_ticker_by_name(name.lower(), ticker_map)
+                        key = (name.lower(), "company", ticker)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        ents.append({"name": name, "type": "company", "ticker": ticker})
+                    elif mapped == "country":
+                        key = (name.lower(), "country", None)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        ents.append({"name": name, "type": "country", "ticker": None})
+                    # ignore other spaCy types
+
+                # explicit $TICKER
+                for m in TICKER_REGEX.finditer(text_full):
+                    tck = m.group(1).upper()
+                    if 2 <= len(tck) <= 6:
+                        key = (tck, "ticker", tck)
+                        if key not in seen:
+                            seen.add(key)
+                            ents.append({"name": tck, "type": "ticker", "ticker": tck})
+
+                # uppercase alnum candidates only if in ticker_map values (conservative)
+                if ticker_map:
+                    ticker_values = set(ticker_map.values())
+                    for m in UPPER_ALNUM_RE.finditer(text_full):
+                        tok = m.group(0).upper()
+                        if 2 <= len(tok) <= 5 and tok in ticker_values:
+                            key = (tok, "ticker", tok)
+                            if key not in seen:
+                                seen.add(key)
+                                ents.append({"name": tok, "type": "ticker", "ticker": tok})
+
+                # detect sector mention if keyword present
+                if is_sector_phrase(text_full):
+                    for kw in SECTOR_KEYWORDS_EN + SECTOR_KEYWORDS_RU:
+                        if kw in text_full.lower():
+                            snippet = kw if len(kw) <= 40 else kw[:40]
+                            if is_valid_entity_name(snippet):
+                                key = (snippet.lower(), "sector", None)
+                                if key not in seen:
+                                    seen.add(key)
+                                    ents.append({"name": snippet, "type": "sector", "ticker": None})
+                            break
+
+                # final filter: keep only allowed canonical types
+                filtered = []
+                for ent in ents:
+                    et = ent.get("type")
+                    if et == "ticker":
+                        if ent.get("ticker"):
+                            filtered.append({"name": ent["ticker"], "type": "ticker", "ticker": ent["ticker"]})
+                    elif et in ("company", "country", "sector"):
+                        if is_valid_entity_name(ent.get("name")):
+                            filtered.append({"name": ent["name"], "type": et, "ticker": ent.get("ticker")})
+                results[idx] = filtered
+        else:
+            # fallback heuristic for language (regex-based)
+            for idx, raw in items:
+                text = raw or ""
+                ents = []
+                seen = set()
+                # $TICKER
+                for m in TICKER_REGEX.finditer(text):
+                    tck = m.group(1).upper()
+                    if 2 <= len(tck) <= 6:
+                        if ("ticker", tck) not in seen:
+                            seen.add(("ticker", tck))
+                            ents.append({"name": tck, "type": "ticker", "ticker": tck})
+                # countries by keywords (very approximate)
+                for country_kw in ["russia", "china", "usa", "united states", "россия", "китай", "сша", "украина", "германия", "франция"]:
+                    if country_kw in text.lower():
+                        if ("country", country_kw) not in seen:
+                            seen.add(("country", country_kw))
+                            ents.append({"name": country_kw.title(), "type": "country", "ticker": None})
+                # sector keywords
+                for kw in SECTOR_KEYWORDS_EN + SECTOR_KEYWORDS_RU:
+                    if kw in text.lower():
+                        if ("sector", kw) not in seen:
+                            seen.add(("sector", kw))
+                            ents.append({"name": kw, "type": "sector", "ticker": None})
+                        break
+                # TitleCase company candidates
+                for m in re.finditer(r"([A-ZА-ЯЁ][a-zа-яё0-9]{2,}(?:\s+[A-ZА-ЯЁ][a-zа-яё0-9]{2,}){0,3})", text):
+                    cand = normalize_entity_name(m.group(1))
+                    if not is_valid_entity_name(cand):
+                        continue
+                    key = ("company", cand.lower())
+                    if key not in seen:
+                        seen.add(key)
+                        ents.append({"name": cand, "type": "company", "ticker": lookup_ticker_by_name(cand, ticker_map)})
+                # filter keep only allowed types and validate
+                filtered = []
+                for ent in ents:
+                    if ent['type'] == "ticker" and ent.get('ticker'):
+                        filtered.append({"name": ent['ticker'], "type": "ticker", "ticker": ent['ticker']})
+                    elif ent['type'] in ("company", "country", "sector") and is_valid_entity_name(ent['name']):
+                        filtered.append({"name": ent['name'], "type": ent['type'], "ticker": ent.get('ticker')})
+                results[idx] = filtered
+
+    # process English bucket, then Russian bucket
+    _process_bucket("en", buckets["en"])
+    _process_bucket("ru", buckets["ru"])
+
+    # any None remaining -> set to empty list
+    for i in range(n):
+        if results[i] is None:
+            results[i] = []
+    return results
 
 # Optional libs
 try:
@@ -91,7 +387,6 @@ class EmbeddingBackend:
 
 # --------------------- similarity utils ---------------------
 def cosine_sim_vectors(a, b) -> float:
-    import numpy as np
     a = np.asarray(a, dtype=float)
     b = np.asarray(b, dtype=float)
     if a.size == 0 or b.size == 0:
@@ -199,7 +494,6 @@ def dedupe_articles(articles: List[Dict[str, Any]],
     backend_name, embs = emb_backend.encode(texts_for_embed)
 
     # convert embs to numpy array if needed
-    import numpy as np
     embs_arr = np.asarray(embs, dtype=float)
 
     # 4. greedy clustering of group reps by cosine similarity
@@ -240,6 +534,20 @@ def dedupe_articles(articles: List[Dict[str, Any]],
 
     # 6. produce annotated articles list with dedup_group_id and cluster meta
     annotated_articles = []
+    # --- BEFORE building clusters_meta, we will extract entities for ALL articles once (batch) ---
+    all_texts_for_ner = []
+    for idx in range(len(articles)):
+        # compose a compact text for NER: title + short text
+        title = articles[idx].get('title','') or ''
+        text = articles[idx].get('text','') or ''
+        snippet = (text[:1000] + '...') if len(text) > 1000 else text
+        all_texts_for_ner.append(title + "\n" + snippet)
+
+    # run NER in batch
+    ner_results = extract_entities_batch(all_texts_for_ner)  # list of list-of-entities
+    # attach entities to each article (simple list)
+    for i, ents in enumerate(ner_results):
+        articles[i].setdefault('entities', ents)
     clusters_meta = {}
     for final_gid, idxs in final_clusters.items():
         # compute some meta: rep (first), size, sources, earliest, latest, avg_similarity_to_rep
@@ -275,6 +583,17 @@ def dedupe_articles(articles: List[Dict[str, Any]],
         dates = [articles[i].get('published') for i in idxs if articles[i].get('published') is not None]
         earliest = min(dates) if dates else None
         latest = max(dates) if dates else None
+        # aggregate entities:
+        ent_counter = {}  # key (name,type,ticker) -> count
+        for i in idxs:
+            for ent in articles[i].get('entities', []):
+                key = (ent.get('name'), ent.get('type'), ent.get('ticker'))
+                ent_counter[key] = ent_counter.get(key, 0) + 1
+
+        # build list sorted by count desc
+        ent_list = []
+        for (name, etype, ticker), cnt in sorted(ent_counter.items(), key=lambda kv: kv[1], reverse=True):
+            ent_list.append({"name": name, "type": etype, "ticker": ticker, "count": cnt})
 
         clusters_meta[final_gid] = {
             "size": len(idxs),
@@ -283,12 +602,15 @@ def dedupe_articles(articles: List[Dict[str, Any]],
             "earliest": earliest,
             "latest": latest,
             "avg_similarity": round(avg_sim, 4),
-            "backend": backend_name
+            "backend": backend_name,
+            "entities": ent_list
         }
 
         for i in idxs:
             a = dict(articles[i])  # copy
             a['dedup_group_id'] = final_gid
+            # ensure we only include lightweight entity representation per article
+            a['entities'] = [{"name": e.get('name'), "type": e.get('type'), "ticker": e.get('ticker')} for e in a.get('entities', [])]
             annotated_articles.append(a)
 
     # sort annotated_articles by published desc

@@ -294,8 +294,8 @@ def extract_events_for_interval(start: str,
             "entities": entities,
             "sources": sources,
             "timeline": timeline,
-            "hotness": hot_res["hotness"],
-            "components": hot_res["components"]
+            "hotness": hot_res.get("hotness", 0.0),
+            "components": hot_res.get("components", {})
         }
 
         # generate draft if requested and generator available

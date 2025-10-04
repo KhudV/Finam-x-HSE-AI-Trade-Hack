@@ -231,21 +231,21 @@ def extract_events_for_interval(start: str,
                                 fetch_text: bool = True,
                                 similarity_threshold: float = 0.78,
                                 model_name: str = "all-MiniLM-L6-v2",
-                                use_sentence_transformers: Optional[bool] = None
+                                use_sentence_transformers: Optional[bool] = None,
+                                generate_drafts: bool = False,
+                                top_k: Optional[int] = None
                                 ) -> List[Dict[str, Any]]:
     """
-    start, end: ISO datetime strings or datetimes (strings recommended)
-    returns: list of event dicts with keys: dedup_group, headline, entities, sources, timeline
+    Returns list of events with fields:
+      dedup_group, headline, entities, sources, timeline, draft (optional), hotness, components
     """
     if feed_urls is None:
         feed_urls = DEFAULT_FINANCE_FEEDS
 
-    # 1) fetch news
     news = get_financial_news(start, end, feed_urls=feed_urls, max_workers=max_workers, fetch_text=fetch_text)
     if not news:
         return []
 
-    # 2) prepare articles for dedupe
     articles = []
     for n in news:
         articles.append({
@@ -256,41 +256,38 @@ def extract_events_for_interval(start: str,
             "source": n.get("source")
         })
 
-    # 3) dedupe / cluster
     annotated_articles, clusters_meta = dedupe_articles(articles,
                                                         similarity_threshold=similarity_threshold,
                                                         model_name=model_name,
                                                         use_sentence_transformers=use_sentence_transformers)
 
-    # compute set of cluster ids
     cluster_ids = sorted({a.get("dedup_group_id") for a in annotated_articles if a.get("dedup_group_id") is not None})
+
+    # Prepare representative texts for all clusters (for surprise calc)
+    rep_texts_all = []
+    cluster_id_to_rep_index = {}
+    for idx, cid in enumerate(cluster_ids):
+        cluster_articles = [a for a in annotated_articles if a.get("dedup_group_id") == cid]
+        if not cluster_articles:
+            rep_text = ""
+        else:
+            rep = cluster_articles[0]
+            rep_text = f"{rep.get('title','')} {rep.get('text','')}"
+        rep_texts_all.append(rep_text)
+        cluster_id_to_rep_index[cid] = idx
 
     events = []
     for cid in cluster_ids:
-        # compute cluster article indices (optional)
-        cluster_article_indices = [i for i,a in enumerate(annotated_articles) if a.get("dedup_group_id")==cid]
-        # choose headline
-        cluster_articles = [a for a in annotated_articles if a.get("dedup_group_id")==cid]
+        cluster_articles = [a for a in annotated_articles if a.get("dedup_group_id") == cid]
         if not cluster_articles:
             continue
         headline = choose_headline_for_cluster(cluster_articles)
-        # entities aggregated
         entities = aggregate_entities_for_cluster(cid, clusters_meta, annotated_articles)
-        # sources and timeline with detection of confirmations/updates
-        sources, timeline = build_sources_and_timeline_for_cluster(cid, cluster_article_indices, annotated_articles, max_sources=5)
+        sources, timeline = build_sources_and_timeline_for_cluster(cid, [], annotated_articles, max_sources=5)
 
-        # compute hotness using hotness_calc.py if available
-        hot_res = {"hotness": 0.0, "components": {
-            "surprise": 0.0, "materiality": 0.0, "velocity": 0.0, "coverage": 0.0, "credibility": 0.0
-        }}
-
-        hot_res_raw = calculate_hotness_for_cluster(cluster_articles)
-        # hot_res_raw expected to contain keys 'hotness' and component values (per your hotness_calc.py)
-        if isinstance(hot_res_raw, dict) and 'hotness' in hot_res_raw:
-            hot_res = hot_res_raw
-        else:
-            # fallback if different shape
-            hot_res = {"hotness": float(hot_res_raw or 0.0), "components": {}}
+        # compute hotness
+        rep_index = cluster_id_to_rep_index[cid]
+        hot_res = compute_hotness_for_cluster(cid, cluster_articles, rep_texts_all, rep_index)
 
         event = {
             "dedup_group": cid,
@@ -298,33 +295,50 @@ def extract_events_for_interval(start: str,
             "entities": entities,
             "sources": sources,
             "timeline": timeline,
-            "hotness": hot_res.get("hotness", 0.0),
-            "components": hot_res.get("components", {})
+            "hotness": hot_res["hotness"],
+            "components": hot_res["components"]
         }
 
-
-        # Generate draft: title separately, rest as text
-        draft_obj = {"title": None, "text": None, "raw": None}
-        try:
-            if _OPENAI_CLIENT is not None:
-                dg = generate_draft_for_event(event, client=_OPENAI_CLIENT, model="openai/gpt-5", temperature=0.0)
-                # dg has keys: title, text, raw
-                draft_obj = dg
-            else:
-                # try to create client from env as fallback
+        # generate draft if requested and generator available
+        if generate_drafts and generate_draft_for_event is not None:
+            try:
+                # ensure client exists
+                client = None
                 try:
-                    client_tmp = make_client_from_env(api_key_env="OPENROUTER_API_KEY", base_url="https://openrouter.ai/api/v1")
-                    draft_obj = generate_draft_for_event(event, client=client_tmp, model="openai/gpt-5", temperature=0.0)
+                    client = make_client_from_env(api_key_env="OPENROUTER_API_KEY", base_url="https://openrouter.ai/api/v1")
                 except Exception:
-                    draft_obj = {"title": None, "text": None, "raw": None}
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning("Draft generation failed for cluster %s: %s", cid, e)
-            draft_obj = {"title": None, "text": None, "raw": None}
+                    client = None
+                if client is not None:
+                    dg = generate_draft_for_event(event, client=client, model="openai/gpt-5", temperature=0.0)
+                    event["draft"] = dg
+                else:
+                    event["draft"] = {"title": None, "text": None, "raw": None}
+            except Exception as e:
+                logger.exception("Draft generation error for cluster %s: %s", cid, e)
+                event["draft"] = {"title": None, "text": None, "raw": None}
+        else:
+            event["draft"] = {"title": None, "text": None, "raw": None}
 
-        event["draft"] = draft_obj
         events.append(event)
+
+    # sort by hotness desc
+    events = sorted(events, key=lambda e: e.get("hotness", 0.0), reverse=True)
+
+    if top_k is not None and isinstance(top_k, int):
+        return events[:top_k]
     return events
+
+# ---------------- CLI entrypoint ----------------
+def parse_iso_datetime(s: str) -> datetime:
+    # try several formats or fallback to dateutil if available
+    try:
+        return datetime.fromisoformat(s)
+    except Exception:
+        try:
+            from dateutil import parser as dp
+            return dp.parse(s)
+        except Exception as e:
+            raise ValueError(f"Cannot parse datetime: {s}") from e
 
 
 def main_cli():
@@ -333,7 +347,6 @@ def main_cli():
     parser.add_argument("end", help="End time (ISO format)")
     parser.add_argument("-k", type=int, default=10, help="Return top-k clusters by hotness")
     parser.add_argument("--feeds", nargs="*", help="Optional list of RSS feed URLs (overrides defaults)")
-    parser.add_argument("--no-draft", action="store_true", help="Do not generate drafts")
     args = parser.parse_args()
 
     try:
@@ -354,8 +367,8 @@ def main_cli():
                                          fetch_text=True,
                                          similarity_threshold=0.78,
                                          model_name="all-MiniLM-L6-v2",
-                                         use_sentence_transformers=None,
-                                         generate_drafts=not args.no_draft,
+                                         use_sentence_transformers=True,
+                                         generate_drafts=True,
                                          top_k=args.k)
 
     # Output JSON to stdout

@@ -14,3 +14,5 @@ openai
 argparse
 re
 json
+dateutil
+logger

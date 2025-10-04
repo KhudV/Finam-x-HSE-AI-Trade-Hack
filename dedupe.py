@@ -79,9 +79,9 @@ if SPACY_AVAILABLE:
 
     # Russian
     try:
-        nlp_ru = spacy.load("ru_core_web_trf")
+        nlp_ru = spacy.load("ru_core_news_lg")
         NER_MODELS["ru"] = nlp_ru
-        NER_BACKEND_NAME["ru"] = "spacy:ru_core_web_trf"
+        NER_BACKEND_NAME["ru"] = "spacy:ru_core_news_lg"
     except Exception:
         try:
             nlp_ru = spacy.load("ru_core_news_sm")

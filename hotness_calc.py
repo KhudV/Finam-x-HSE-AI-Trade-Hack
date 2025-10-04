@@ -4,7 +4,14 @@ from collections import defaultdict
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from typing import List, Dict
+import sys
+import os
 
+base_path, _ = os.path.split(os.getcwd())
+if base_path not in sys.path:
+    sys.path.append(base_path)
+
+from dedupe import extract_entities_batch, EmbeddingBackend
 # Константы
 WEIGHTS = {
     'surprise': 0.25,
@@ -22,26 +29,21 @@ SOURCE_RATINGS = {
     'All Articles on Seeking Alpha': 8
 }
 
-def extract_entities(text: str) -> List[str]:
-    """
-    Извлечение именованных сущностей из текста.
-    В реальной реализации здесь будет использоваться NLP библиотека (spaCy, NLTK и т.д.)
-    """
-    pass
-
 def get_embedding(text: str) -> np.ndarray:
     """
     Получение эмбеддинга текста.
-    В реальной реализации использовать SentenceTransformers или аналоги.
     """
-    pass
+    encoder = EmbeddingBackend(use_sentence_transformers=True)
+    embedding = encoder.encode([text])[1][0]
+    return embedding
+    
 
 def get_reference_news(entities: List[str]) -> str:
     """
     Получение референсных новостей по списку сущностей.
     В реальной реализации здесь будет запрос к News API или другой базе новостей.
     """
-    pass
+    return " ".join(entities) + " reference news content about market trends and financial analysis."
 
 def calculate_surprise(news_text: str, entities: List[str]) -> float:
     """Расчет неожиданности новости"""
@@ -136,17 +138,18 @@ def sigmoid(x: float) -> float:
     """Сигмоидальная функция для нормализации в диапазон [0, 1]"""
     return 1 / (1 + math.exp(-x))
 
-def calculate_hotness_for_cluster(cluster_news: List[Dict]) -> Dict[str, float]:
+def calculate_hotness_for_cluster(cluster_news: List[Dict]) -> float:
     """Основная функция расчета горячести для кластера новостей"""
     if not cluster_news:
-        return {'hotness': 0.0}
+        return 0.0
     
     # Берем первую новость как представителя кластера для некоторых метрик
     representative_news = cluster_news[0]
     full_text = f"{representative_news['title']} {representative_news['text']}"
     
     # Извлекаем сущности
-    entities = extract_entities(full_text)
+    entities = extract_entities_batch([full_text])[0]
+    entities = [ent["name"] for ent in entities]
     
     # Расчет компонентов
     surprise = calculate_surprise(full_text, entities)
@@ -167,23 +170,9 @@ def calculate_hotness_for_cluster(cluster_news: List[Dict]) -> Dict[str, float]:
     # Применяем сигмоиду для нормализации
     hotness = sigmoid(weighted_sum * 10 - 5)  # Масштабируем для лучшего поведения сигмоиды
     
-    return {
-        'hotness': hotness,
-        'surprise': surprise,
-        'materiality': materiality,
-        'velocity': velocity,
-        'coverage': coverage,
-        'credibility': credibility,
-        'components': {
-            'surprise': surprise,
-            'materiality': materiality,
-            'velocity': velocity,
-            'coverage': coverage,
-            'credibility': credibility
-        }
-    }
+    return hotness
 
-def calculate_hotness_for_all_clusters(news_list: List[Dict]) -> Dict[int, Dict]:
+def calculate_hotness_for_all_clusters(news_list: List[Dict]) -> Dict[int, float]:
     """Расчет горячести для всех кластеров"""
     clusters = defaultdict(list)
     

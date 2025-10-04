@@ -11,7 +11,6 @@ from hotness_calc import calculate_hotness_for_cluster
 import os
 from draft_generator import generate_draft_for_event, make_client_from_env
 from openai import OpenAI
-from hotness_calc import calculate_hotness_for_all_clusters, calculate_hotness_for_cluster
 
 try:
     _OPENAI_CLIENT = make_client_from_env(api_key_env="OPENROUTER_API_KEY", base_url="https://openrouter.ai/api/v1")
@@ -287,12 +286,11 @@ def extract_events_for_interval(start: str,
 
         # compute hotness
         rep_index = cluster_id_to_rep_index[cid]
-        hot_res = compute_hotness_for_cluster(cid, cluster_articles, rep_texts_all, rep_index)
+        hot_res = calculate_hotness_for_cluster(cluster_articles)
 
         event = {
             "dedup_group": cid,
             "headline": headline,
-            "hotness": hotness,
             "entities": entities,
             "sources": sources,
             "timeline": timeline,

@@ -9,7 +9,7 @@ from dedupe import dedupe_articles  # возвращает annotated_articles, c
 import os
 from draft_generator import generate_draft_for_event, make_client_from_env
 from openai import OpenAI
-
+from hotness_calc import calculate_hotness_for_all_clusters, calculate_hotness_for_cluster
 
 try:
     _OPENAI_CLIENT = make_client_from_env(api_key_env="OPENROUTER_API_KEY", base_url="https://openrouter.ai/api/v1")
@@ -276,10 +276,11 @@ def extract_events_for_interval(start: str,
         entities = aggregate_entities_for_cluster(cid, clusters_meta, annotated_articles)
         # sources and timeline with detection of confirmations/updates
         sources, timeline = build_sources_and_timeline_for_cluster(cid, cluster_article_indices, annotated_articles, max_sources=5)
-
+        hotness = calculate_hotness_for_cluster(annotated_articles)
         event = {
             "dedup_group": cid,
             "headline": headline,
+            "hotness": hotness,
             "entities": entities,
             "sources": sources,
             "timeline": timeline

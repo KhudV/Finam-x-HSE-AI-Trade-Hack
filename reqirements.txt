@@ -11,3 +11,8 @@ numpy
 spacy>=3.0.0
 beautifulsoup4>=4.12.2,<5
 openai
+argparse
+re
+json
+dateutil
+logger

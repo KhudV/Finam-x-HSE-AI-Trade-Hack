@@ -286,8 +286,32 @@ def extract_events_for_interval(start: str,
         sources, timeline = build_sources_and_timeline_for_cluster(cid, [], annotated_articles, max_sources=5)
 
         # compute hotness
-        rep_index = cluster_id_to_rep_index[cid]
-        hot_res = compute_hotness_for_cluster(cid, cluster_articles, rep_texts_all, rep_index)
+        hot_res = {"hotness": 0.0, "components": {
+            "surprise": 0.0, "materiality": 0.0, "velocity": 0.0, "coverage": 0.0, "credibility": 0.0
+        }}
+
+        if calculate_hotness_for_cluster is not None:
+            try:
+                # hotness_calc.calculate_hotness_for_cluster expects a list of news dicts
+                # where each dict contains at least: 'title', 'text', 'published', 'source'
+                # our cluster_articles already have those keys (from annotated_articles)
+                hot_res_raw = calculate_hotness_for_cluster(cluster_articles)
+                # hot_res_raw expected to contain keys 'hotness' and component values (per your hotness_calc.py)
+                if isinstance(hot_res_raw, dict) and 'hotness' in hot_res_raw:
+                    hot_res = hot_res_raw
+                else:
+                    # fallback if different shape
+                    hot_res = {"hotness": float(hot_res_raw or 0.0), "components": {}}
+            except Exception as e:
+                # don't fail pipeline — log and fallback
+                import logging
+                logging.getLogger(__name__).warning("hotness_calc.calculate_hotness_for_cluster failed for cluster %s: %s", cid, e)
+                hot_res = {"hotness": 0.0, "components": {
+                    "surprise": 0.0, "materiality": 0.0, "velocity": 0.0, "coverage": 0.0, "credibility": 0.0
+                }}
+        else:
+            # hotness module not available — keep default fallback
+            pass
 
         event = {
             "dedup_group": cid,
@@ -295,8 +319,8 @@ def extract_events_for_interval(start: str,
             "entities": entities,
             "sources": sources,
             "timeline": timeline,
-            "hotness": hot_res["hotness"],
-            "components": hot_res["components"]
+            "hotness": hot_res.get("hotness", 0.0),
+            "components": hot_res.get("components", {})
         }
 
         # generate draft if requested and generator available

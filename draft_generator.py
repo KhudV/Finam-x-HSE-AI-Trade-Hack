@@ -37,7 +37,7 @@ def generate_draft_for_event(event: Dict[str, Any],
                              client: Optional[OpenAI] = None,
                              model: str = "openai/gpt-5",
                              temperature: float = 0.0,
-                             max_tokens: int = 512,
+                             max_tokens: int = 20000,
                              retries: int = 2) -> Dict[str, Any]:
     """
     Returns: {"title": str or None, "text": str or None, "raw": str}
@@ -88,22 +88,32 @@ def generate_draft_for_event(event: Dict[str, Any],
                 model=model,
                 messages=messages,
                 temperature=temperature,
-                max_tokens=max_tokens
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"}
             )
             # extract model text (robust paths)
             model_text = None
-            try:
-                model_text = resp.choices[0].message["content"]
-            except Exception:
-                try:
-                    model_text = resp.choices[0].message.content
-                except Exception:
-                    try:
-                        model_text = resp.choices[0].get("message", {}).get("content")
-                    except Exception:
-                        model_text = str(resp)
+            #try:
+            #    model_text = resp.choices[0].message["content"]
+            #except Exception:
+            #    try:
+            #        model_text = resp.choices[0].message.content
+            #    except Exception:
+            #        try:
+            #            model_text = resp.choices[0].get("message", {}).get("content")
+            #        except Exception:
+            #            model_text = str(resp)
+            if resp.choices and len(resp.choices) > 0:
+                choice = resp.choices[0]
+                if hasattr(choice, 'message') and choice.message:
+                    if hasattr(choice.message, 'content'):
+                        model_text = choice.message.content
+                    else:
+                        # Альтернативный способ доступа
+                        model_text = getattr(choice.message, 'content', None)
 
             if not model_text:
+                logger.warning("Не удалось извлечь content из ответа. Структура ответа: %s", resp)
                 model_text = str(resp)
 
             parsed = _extract_json_from_text(model_text)

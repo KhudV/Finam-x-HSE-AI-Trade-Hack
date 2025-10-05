@@ -11,13 +11,16 @@ from hotness_calc import calculate_hotness_for_cluster
 import os
 from draft_generator import generate_draft_for_event, make_client_from_env
 from openai import OpenAI
+import sys
+
+os.environ['OPENROUTER_API_KEY'] = "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"
 
 try:
     _OPENAI_CLIENT = make_client_from_env(api_key_env="OPENROUTER_API_KEY", base_url="https://openrouter.ai/api/v1")
 except Exception as e:
     _OPENAI_CLIENT = None
     import logging
-    logging.getLogger(__name__).warning("OpenAI client not initialized: %s", e)
+    logger = logging.getLogger(__name__).warning("OpenAI client not initialized: %s", e)
 
 
 # ---------- Настройки / словари ----------
@@ -222,6 +225,14 @@ def aggregate_entities_for_cluster(cluster_id: int,
     out = [{"name": e["name"], "type": e["type"], "ticker": e.get("ticker")} for e in ents]
     return out[:top_n]
 
+def get_str_timeline(timeline: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Заменяет несериализуемые объекты datetime.dateteime на строки ISO-формата."""
+    for tml in timeline:
+        timestamp = tml['ts']
+        timestamp_str = timestamp.isoformat()
+        tml['ts'] = timestamp_str
+    return timeline
+
 # Main function: given start/end, return list of events with required fields
 def extract_events_for_interval(start: str,
                                 end: str,
@@ -287,15 +298,15 @@ def extract_events_for_interval(start: str,
         # compute hotness
         rep_index = cluster_id_to_rep_index[cid]
         hot_res = calculate_hotness_for_cluster(cluster_articles)
-
+        timeline_str = get_str_timeline(timeline)
         event = {
             "dedup_group": cid,
             "headline": headline,
             "entities": entities,
             "sources": sources,
-            "timeline": timeline,
-            "hotness": hot_res.get("hotness", 0.0),
-            "components": hot_res.get("components", {})
+            "timeline": timeline_str,
+            "hotness": hot_res,
+            #"components": hot_res.get("components", {})
         }
 
         # generate draft if requested and generator available
